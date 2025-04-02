@@ -31,3 +31,5 @@ All files in /sounds are [CC0](https://creativecommons.org/publicdomain/zero/1.0
 # Publishing to github-pages
 To update the hosted demo, build the `dist` artifacts then
 > git subtree push --prefix dist origin gh-pages
+
+[view the demo](datadoghq.dev/dtln-rs-demo)
