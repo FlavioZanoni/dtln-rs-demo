@@ -44,9 +44,11 @@ function totalSignal(buffer: Float32Array): number {
 class NoiseSuppressionWorker extends AudioWorkletProcessor {
   private dtln_handle: DtlnPluginOpaqueHandle | undefined;
 
-  // resampling state
+  // resampling
   private native_rate = 0;
   private resample_ratio = 1;
+  private downsample_frac = 0;
+  private upsample_frac = 0;
   private upsample_last = 0;
 
   // input accumulator at 16kHz
@@ -61,10 +63,17 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
   private ring_read = 0;
   private ring_write = 0;
   private ring_count = 0;
-  private downsample_frac = 0;
-  private upsample_frac = 0;
+
+  // gate
+  private gate_threshold = 0.002;
+  private gate_envelope = 0;
+  private gate_attack = 0;
+  private gate_release = 0;
+  private gate_open = 0;
+  private gate_coeffs_set = false;
+
+  // output
   private output_gain = 3.0;
-  private noise_gate = 0.002;
 
   // metrics
   private collectMetrics = true;
@@ -80,16 +89,15 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
     if (options?.processorOptions?.disableMetrics) {
       this.collectMetrics = false;
     }
-    this.port.postMessage("ready");
-
     this.port.onmessage = (event) => {
       if (typeof event.data?.output_gain === "number") {
         this.output_gain = event.data.output_gain;
       }
       if (typeof event.data?.noise_gate === "number") {
-        this.noise_gate = event.data.noise_gate;
+        this.gate_threshold = event.data.noise_gate;
       }
     };
+    this.port.postMessage("ready");
   }
 
   process(
@@ -117,9 +125,16 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
       this.resample_ratio = this.native_rate / DTLN_SAMPLE_RATE;
     }
 
+    if (!this.gate_coeffs_set) {
+      const block_rate = DTLN_SAMPLE_RATE / DTLN_FIXED_BUFFER_SIZE;
+      this.gate_attack = 1.0 - Math.exp(-1.0 / (block_rate * 0.005));
+      this.gate_release = 1.0 - Math.exp(-1.0 / (block_rate * 0.08));
+      this.gate_coeffs_set = true;
+    }
+
     const ratio = this.resample_ratio;
 
-    // downsample: walk through input at native rate, emit one sample per ratio steps
+    // downsample input to 16kHz
     let src = this.downsample_frac;
     while (src < input.length) {
       this.input_buf[this.input_index++] =
@@ -135,15 +150,13 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
           console.error("[DTLN] dtln_denoise failed:", e);
           this.dtln_out.fill(0);
         }
-        for (let i = 0; i < DTLN_FIXED_BUFFER_SIZE; i++) {
-          if (Math.abs(this.dtln_out[i]) < this.noise_gate)
-            this.dtln_out[i] = 0;
-        }
+
+        this.applyGate();
 
         this.input_index = 0;
         if (this.collectMetrics) this.updateMetrics();
 
-        // upsample: for each 16kHz sample, emit `ratio` native-rate samples
+        // upsample back to native rate with linear interpolation
         let frac = this.upsample_frac;
         for (let i = 0; i < DTLN_FIXED_BUFFER_SIZE; i++) {
           const next = this.dtln_out[i];
@@ -162,9 +175,9 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
         this.upsample_frac = frac;
       }
     }
-    // carry leftover fractional position into next quantum
     this.downsample_frac = src - input.length;
 
+    // drain ring into output
     if (this.ring_count >= output.length) {
       for (let i = 0; i < output.length; i++) {
         output[i] = this.ring[this.ring_read] * this.output_gain;
@@ -176,6 +189,30 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
     }
 
     return true;
+  }
+
+  private applyGate(): void {
+    // compute block RMS
+    let rms = 0;
+    for (let i = 0; i < DTLN_FIXED_BUFFER_SIZE; i++) {
+      rms += this.dtln_out[i] * this.dtln_out[i];
+    }
+    rms = Math.sqrt(rms / DTLN_FIXED_BUFFER_SIZE);
+
+    // envelope follower - fast attack, slow release
+    if (rms > this.gate_envelope) {
+      this.gate_envelope += this.gate_attack * (rms - this.gate_envelope);
+    } else {
+      this.gate_envelope += this.gate_release * (rms - this.gate_envelope);
+    }
+
+    // smooth gate open/close to avoid clicks
+    const target = this.gate_envelope > this.gate_threshold ? 1.0 : 0.0;
+    this.gate_open += 0.1 * (target - this.gate_open);
+
+    for (let i = 0; i < DTLN_FIXED_BUFFER_SIZE; i++) {
+      this.dtln_out[i] *= this.gate_open;
+    }
   }
 
   private sendMetrics(): void {
@@ -211,4 +248,3 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
 }
 
 registerProcessor("NoiseSuppressionWorker", NoiseSuppressionWorker);
-
