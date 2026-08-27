@@ -36,9 +36,12 @@ mic ──▶ [ anti-alias + decimate to 16 kHz ]      only when the context
   browser's own resampler handles the mic, which is better than anything the
   worklet can do inline. At other rates it falls back to an internal path: a
   4th-order Butterworth low-pass at 7 kHz before decimation, linear
-  interpolation on the way back.
-- **Latency.** ~24 ms added at a 16 kHz context (a 512-sample block minus one
-  128-sample render quantum), on top of the graph's own I/O latency.
+  interpolation on the way back. That path only handles rates *above* 16 kHz;
+  a context below it is not supported (nothing filters the way back out).
+- **Latency.** ~44 ms added at a 16 kHz context, measured by rendering a tone
+  burst through it (697 samples). Only 24 ms of that is this worklet's own
+  buffering - a 512-sample block minus one 128-sample render quantum - the
+  rest is `dtln_denoise`'s own frame delay. On top of the graph's I/O latency.
 - **Gain.** Unity. The model attenuates, so the consumer applies its own
   makeup gain - deliberately one visible knob outside this worklet rather than
   two multiplying constants in different repos.
@@ -52,9 +55,9 @@ mic ──▶ [ anti-alias + decimate to 16 kHz ]      only when the context
 
 DTLN suppresses noise but does not silence a quiet channel, so a gate runs on
 its output: block RMS into an envelope follower (instant attack, ~80 ms
-release), a threshold with 6 dB of hysteresis, then a gain that opens fast
-(~64 ms) and closes slowly (~300 ms), ramped per sample so transitions don't
-click. Fast opening is the point - a slow one eats the first syllable after
+release), a threshold with 6 dB of hysteresis, then a gain that opens with a
+~27 ms time constant and closes with a ~300 ms one (about 64 ms and 700 ms to
+settle), ramped per sample so transitions don't click. Fast opening is the point - a slow one eats the first syllable after
 every pause.
 
 Set the threshold with `port.postMessage({ noise_gate })` (RMS, `0` disables
@@ -96,6 +99,7 @@ enough to debug; a worklet that never answers is not.
 npm install
 npm run build    # -> dist/audio-worklet.js (~8 MB: the models are embedded)
 npm run sync     # build + install it into the sibling awful checkout
+npm run serve    # serve dist/ at http://localhost:8080 (build first)
 ```
 
 `npm run sync` copies the bundle to `frontend/public/audio-worklet.js` and
@@ -109,23 +113,27 @@ bundle by hand.** It looks for `../awful2` (then `../awful`), or takes a path:
 node sync-to-awful.mjs ../wherever/awful2     # or set AWFUL_DIR
 ```
 
-## Verifying it
+## Trying it and verifying it
 
-`index.html` is a self-check: it renders synthetic noise, speech, and silence
-through the worklet in an `OfflineAudioContext` and asserts that noise is
-suppressed, speech survives, and silence stays silent.
+Two pages, both built into `dist/` and served by `npm run serve`:
 
-```sh
-npm run build && npm run serve   # then open the page
-```
+**`index.html` - the lab.** Input and output spectrograms (0-8 kHz) side by
+side, so you can see what the model removed rather than only hearing it. Two
+modes: *live* runs your mic through the worklet with the spectrograms scrolling
+and optional monitoring (headphones - speakers feed back), and *record*
+captures a clip, denoises it offline and gives you before/after players to A/B.
+The noise-gate slider (in dBFS; the -54 dB default is the worklet's `0.002`)
+is live in both modes - in record mode, moving it re-processes the clip you
+already captured, so judging a threshold does not mean recording a new take
+per value. That matters because `0.002` is a guess until someone listens to
+their own voice through it.
 
-It is also published to GitHub Pages on every push to `main`
-(`.github/workflows/pages.yml`), so it can be run without a checkout:
-<https://flaviozanoni.github.io/dtln-rs-web/>. It needs no microphone and no
-user gesture - the signals are synthetic and rendered in an
-`OfflineAudioContext` - so it runs to completion on load.
+What you hear carries the same 3x makeup gain awful applies, so "after" is as
+loud here as on a call; what you *see* does not, so both spectrograms share
+one scale and the output panel is not 9.5 dB hot against the input beside it.
 
-A healthy run:
+**`check.html` - the self-check.** Renders synthetic noise, speech and digital
+silence through the worklet and asserts what comes back:
 
 ```
 worklet ready in 19 ms
@@ -135,10 +143,18 @@ PASS  silence stays silent  rms 0.0e+0
 PASS  output is finite      0 non-finite samples
 ```
 
-Thresholds are loose deliberately: this catches *broken*, not "1 dB worse".
-It exists because the easiest thing to ship here is a **silent** worklet, and
-no amount of unit testing with fake audio nodes can catch that - the WASM
-never runs in them. If you change `main.ts`, run this before syncing.
+Thresholds are loose deliberately: this catches *broken*, not "1 dB worse". It
+needs no microphone and no user gesture, so it runs to completion on load.
+
+Both pages are published to GitHub Pages on every push to `main`
+(`.github/workflows/pages.yml`): the lab at
+<https://flaviozanoni.github.io/dtln-rs-web/> and the self-check at
+<https://flaviozanoni.github.io/dtln-rs-web/check.html>.
+
+Run the self-check before syncing a worklet change, and the lab when the change
+is one that only ears can judge. The easiest thing to ship here is a **silent**
+worklet, and no amount of unit testing with fake audio nodes catches that - the
+WASM never runs in them.
 
 The trap that makes it necessary: `dtln_create()` returns incrementing ids and
 the first one is **0**. Testing the handle for truthiness (`!handle`) therefore
@@ -151,9 +167,10 @@ completely - silently, since nothing throws. Compare against `undefined`.
 | --- | --- |
 | `src/audio-worklet/main.ts` | the worklet: resampling, blocking, gate, ring buffer |
 | `src/audio-worklet/dtln.js` | emscripten glue + embedded model (generated; only its hand-written tail is edited) |
-| `src/test.js`, `index.html` | the self-check page |
+| `src/app.js`, `index.html` | the lab: spectrograms, live monitor, A/B record |
+| `src/test.js`, `check.html` | the self-check page |
 | `sync-to-awful.mjs` | build artifact → awful, with cache-busting hash |
-| `.github/workflows/pages.yml` | builds `dist/` and publishes the self-check |
+| `.github/workflows/pages.yml` | builds `dist/` and publishes both pages |
 
 ## Attribution
 

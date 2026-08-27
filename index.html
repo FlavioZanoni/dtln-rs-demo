@@ -3,43 +3,226 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>dtln worklet self-check</title>
-    <script src="test.js" defer></script>
+    <title>dtln lab</title>
+    <script src="app.js" defer></script>
     <style>
+      :root {
+        color-scheme: light dark;
+        --fg: #111;
+        --muted: #666;
+        --error: #b3261e;
+        --line: #0002;
+        --tint: #0001;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --fg: #e6e6e6;
+          --muted: #9a9a9a;
+          --error: #f2b8b5;
+          --line: #fff3;
+          --tint: #fff2;
+        }
+      }
+      /* The UA rule for [hidden] is display:none, but any author `display`
+         beats it - without this the players show empty on load and the
+         monitor checkbox never hides. */
+      [hidden] {
+        display: none !important;
+      }
       body {
         font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
-        max-width: 60rem;
+        color: var(--fg);
+        max-width: 56rem;
         margin: 2rem auto;
         padding: 0 1rem;
       }
       h1 {
         font-size: 1rem;
         font-weight: 600;
+        margin: 0;
       }
-      p {
-        color: #666;
+      .sub,
+      #status,
+      label,
+      .spec > span,
+      #players span,
+      .legend {
+        color: var(--muted);
       }
-      #out div {
-        white-space: pre-wrap;
+      .sub {
+        margin: 0.25rem 0 1.5rem;
       }
-      .pass {
-        color: #0a7d28;
+      a {
+        color: inherit;
       }
-      .fail {
-        color: #b3261e;
+      .row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        flex-wrap: wrap;
+        margin-bottom: 1rem;
+      }
+      .tabs {
+        display: inline-flex;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        overflow: hidden;
+      }
+      .tabs button,
+      #action {
+        font: inherit;
+        color: inherit;
+        background: transparent;
+        border: 0;
+        padding: 0.35rem 0.9rem;
+        cursor: pointer;
+      }
+      .tabs button[aria-selected="true"] {
+        background: var(--tint);
+        box-shadow: inset 0 -2px 0 currentColor;
         font-weight: 600;
       }
-      .info {
-        color: #666;
+      #action {
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 0.35rem 1rem;
+      }
+      button:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      #status.error {
+        color: var(--error);
+      }
+      label {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+      }
+      .spec {
+        margin-bottom: 0.75rem;
+      }
+      .spec > span {
+        display: block;
+        margin-bottom: 0.2rem;
+      }
+      .frame {
+        position: relative;
+      }
+      canvas {
+        width: 100%;
+        height: 160px;
+        display: block;
+        border-radius: 4px;
+        background: rgb(8, 10, 35);
+      }
+      .frame b {
+        position: absolute;
+        left: 0.4rem;
+        font-weight: 400;
+        font-size: 11px;
+        color: #ffffffb0;
+        pointer-events: none;
+      }
+      .frame b.top {
+        top: 0.2rem;
+      }
+      .frame b.bottom {
+        bottom: 0.2rem;
+      }
+      .legend {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-size: 12px;
+        margin-bottom: 1rem;
+      }
+      .ramp {
+        width: 9rem;
+        height: 0.6rem;
+        border-radius: 2px;
+        background: linear-gradient(
+          to right,
+          rgb(8, 10, 35),
+          rgb(20, 60, 160),
+          rgb(30, 170, 190),
+          rgb(240, 220, 90),
+          rgb(255, 255, 235)
+        );
+      }
+      #players {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+        gap: 1rem;
+        margin-top: 1rem;
+      }
+      #players span {
+        display: block;
+        margin-bottom: 0.3rem;
+      }
+      #players audio {
+        width: 100%;
       }
     </style>
   </head>
   <body>
-    <h1>dtln worklet self-check</h1>
-    <p>
-      Renders synthetic noise, speech, and silence through the worklet and
-      checks what comes back. Takes a few seconds.
+    <h1>dtln lab</h1>
+    <p class="sub">
+      What the noise suppression does, seen and heard. Listen live, or record a
+      clip and compare before/after. · <a href="check.html">self-check</a>
     </p>
-    <div id="out"><div class="info">running…</div></div>
+
+    <div class="row">
+      <span class="tabs" role="tablist" aria-label="mode">
+        <button data-mode="live" role="tab" aria-selected="true">Live</button>
+        <button data-mode="record" role="tab" aria-selected="false">Record</button>
+      </span>
+      <button id="action">Start listening</button>
+      <span id="status" role="status" aria-live="polite"></span>
+    </div>
+
+    <div class="row">
+      <label>
+        noise gate
+        <input
+          id="gate"
+          type="range"
+          min="-90"
+          max="-30"
+          step="1"
+          value="-54"
+          aria-label="noise gate threshold in dBFS"
+        />
+        <span id="gateValue">-54 dB</span>
+      </label>
+      <label id="monitorRow">
+        <input id="monitor" type="checkbox" checked />
+        hear it (headphones — speakers will feed back)
+      </label>
+    </div>
+
+    <div class="spec">
+      <span>input · raw mic</span>
+      <div class="frame">
+        <canvas id="specIn"></canvas>
+        <b class="top">8k</b><b class="bottom">0 Hz</b>
+      </div>
+    </div>
+    <div class="spec">
+      <span>output · denoised</span>
+      <div class="frame">
+        <canvas id="specOut"></canvas>
+        <b class="top">8k</b><b class="bottom">0 Hz</b>
+      </div>
+    </div>
+    <div class="legend">
+      <span>−95 dB</span><span class="ramp"></span><span>−15 dB</span>
+      <span>· both panels measured before the 3× makeup gain</span>
+    </div>
+
+    <div id="players" hidden>
+      <div><span>before</span><audio id="rawAudio" controls></audio></div>
+      <div><span>after</span><audio id="denoisedAudio" controls></audio></div>
+    </div>
   </body>
 </html>

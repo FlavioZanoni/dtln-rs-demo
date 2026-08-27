@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>dtln worklet self-check</title>
+    <script src="test.js" defer></script>
+    <style>
+      body {
+        font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+        max-width: 60rem;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      h1 {
+        font-size: 1rem;
+        font-weight: 600;
+      }
+      p {
+        color: #666;
+      }
+      #out div {
+        white-space: pre-wrap;
+      }
+      .pass {
+        color: #0a7d28;
+      }
+      .fail {
+        color: #b3261e;
+        font-weight: 600;
+      }
+      .info {
+        color: #666;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>dtln worklet self-check</h1>
+    <p>
+      Renders synthetic noise, speech, and silence through the worklet and
+      checks what comes back. Takes a few seconds. ·
+      <a href="index.html">lab</a>
+    </p>
+    <div id="out"><div class="info">running…</div></div>
+  </body>
+</html>

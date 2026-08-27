@@ -12,17 +12,6 @@ const common = {
     extensions: [".ts", ".js"],
   },
 
-  plugins: [
-    new CopyWebpackPlugin({
-      patterns: [
-        {
-          from: "./index.html",
-          to: "./",
-        },
-      ],
-    }),
-  ],
-
   module: {
     rules: [
       {
@@ -34,12 +23,23 @@ const common = {
   },
 };
 
-const selfCheck = merge(common, {
+const pages = merge(common, {
   target: 'web',
-  entry: "./src/test.js",
-  output: {
-    filename: "test.js",
+  entry: {
+    app: "./src/app.js",   // the lab: spectrograms, live monitor, A/B record
+    test: "./src/test.js", // the self-check
   },
+  output: {
+    filename: "[name].js",
+  },
+  plugins: [
+    new CopyWebpackPlugin({
+      patterns: [
+        { from: "./index.html", to: "./" },
+        { from: "./check.html", to: "./" },
+      ],
+    }),
+  ],
 });
 
 const audioWorklet = merge(common, {
@@ -51,6 +51,6 @@ const audioWorklet = merge(common, {
 });
 
 export default [
-  selfCheck,
+  pages,
   audioWorklet,
 ];
