@@ -121,7 +121,7 @@ npm run build && npm run serve   # then open the page
 
 It is also published to GitHub Pages on every push to `main`
 (`.github/workflows/pages.yml`), so it can be run without a checkout:
-<https://flaviozanoni.github.io/dtln-rs-demo/>. It needs no microphone and no
+<https://flaviozanoni.github.io/dtln-rs-web/>. It needs no microphone and no
 user gesture - the signals are synthetic and rendered in an
 `OfflineAudioContext` - so it runs to completion on load.
 

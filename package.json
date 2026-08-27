@@ -1,5 +1,5 @@
 {
-  "name": "dtln-rs-demo",
+  "name": "dtln-rs-web",
   "private": true,
   "version": "0.0.0",
   "description": "DTLN noise suppression as an AudioWorklet, packaged for awful",
