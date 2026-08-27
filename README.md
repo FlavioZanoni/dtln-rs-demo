@@ -43,7 +43,10 @@ mic ──▶ [ anti-alias + decimate to 16 kHz ]      only when the context
   makeup gain - deliberately one visible knob outside this worklet rather than
   two multiplying constants in different repos.
 - **CPU.** The WASM is SIMD-vectorized and single-threaded; one inference runs
-  inline every 4th render quantum at 16 kHz.
+  inline every 4th render quantum at 16 kHz. Measured on a desktop (headless
+  Chromium, offline render): ~12 ms of inference per 32 ms block, so roughly
+  40% of one core while a mic is live. Fine there - close enough to the budget
+  that it is worth measuring on low-end mobile rather than assuming.
 
 ### The noise gate
 
@@ -116,9 +119,25 @@ suppressed, speech survives, and silence stays silent.
 npm run build && npm run serve   # then open the page
 ```
 
-It exists because the easiest thing to ship here is a *silent* worklet, and no
-amount of unit testing with fake audio nodes can catch that - the WASM never
-runs in them. If you change `main.ts`, run this before syncing.
+A healthy run:
+
+```
+worklet ready in 19 ms
+PASS  noise is suppressed  -27.9 dB (want <= -12)
+PASS  speech survives       -0.4 dB (want >= -3)
+PASS  silence stays silent  rms 0.0e+0
+PASS  output is finite      0 non-finite samples
+```
+
+Thresholds are loose deliberately: this catches *broken*, not "1 dB worse".
+It exists because the easiest thing to ship here is a **silent** worklet, and
+no amount of unit testing with fake audio nodes can catch that - the WASM
+never runs in them. If you change `main.ts`, run this before syncing.
+
+The trap that makes it necessary: `dtln_create()` returns incrementing ids and
+the first one is **0**. Testing the handle for truthiness (`!handle`) therefore
+reads a perfectly good denoiser as a missing one and mutes the worklet
+completely - silently, since nothing throws. Compare against `undefined`.
 
 ## Layout
 
