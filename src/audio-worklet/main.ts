@@ -1,26 +1,27 @@
 import type { DtlnPluginOpaqueHandle } from "dtln-rs";
 import dtln from "./dtln.js";
 
-export interface NoiseSuppressionMetrics {
-  avg_samples_processed: number;
-  avg_input_signal: number;
-  avg_output_signal: number;
-  avg_signal_enhancement: number;
-  avg_signal_suppression: number;
-}
-
 const DTLN_FIXED_BUFFER_SIZE = 512;
 const DTLN_SAMPLE_RATE = 16000;
 const RING_SIZE = DTLN_FIXED_BUFFER_SIZE * 8;
-const SAMPLE_LOG_INTERVAL = 5000;
+
+// Gate time constants, per 512-sample block (31.25 blocks/s at 16 kHz).
+// The envelope attack is instant - anything under one block collapses to
+// instant at this rate anyway - and the release is ~80 ms.
+const GATE_BLOCK_RATE = DTLN_SAMPLE_RATE / DTLN_FIXED_BUFFER_SIZE;
+const GATE_ENV_RELEASE = 1.0 - Math.exp(-1.0 / (GATE_BLOCK_RATE * 0.08));
+// Gain smoothing: open fast (~91% in 2 blocks / 64 ms) so speech onsets
+// survive the gate, close slow (~300 ms) so tails fade instead of chopping.
+const GATE_OPEN_COEFF = 0.7;
+const GATE_CLOSE_COEFF = 0.1;
 
 interface AudioWorkletProcessor {
   readonly port: MessagePort;
   process(
     inputs: Float32Array[][],
     outputs: Float32Array[][],
-    parameters: Map<string, Float32Array>,
-  ): void;
+    parameters: Record<string, Float32Array>,
+  ): boolean;
 }
 declare function registerProcessor(
   name: string,
@@ -35,14 +36,22 @@ declare let AudioWorkletProcessor: {
   new (options?: AudioWorkletNodeOptions): AudioWorkletProcessor;
 };
 
-function totalSignal(buffer: Float32Array): number {
-  let sum = 0;
-  for (const value of buffer.values()) sum += Math.abs(value);
-  return sum;
-}
+// The WASM runtime finishes initializing asynchronously, after this module
+// has evaluated. Hooking postRun here is race-free: instantiation waits on a
+// promise that cannot resolve before module evaluation completes.
+let wasmReady = false;
+const onWasmReady: Array<() => void> = [];
+dtln.postRun = [
+  () => {
+    wasmReady = true;
+    for (const cb of onWasmReady) cb();
+    onWasmReady.length = 0;
+  },
+];
 
 class NoiseSuppressionWorker extends AudioWorkletProcessor {
   private dtln_handle: DtlnPluginOpaqueHandle | undefined;
+  private denoise_failures = 0;
 
   // resampling
   private native_rate = 0;
@@ -50,6 +59,12 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
   private downsample_frac = 0;
   private upsample_frac = 0;
   private upsample_last = 0;
+
+  // anti-alias low-pass before decimation; only used when ratio > 1
+  // (awful runs a 16 kHz context, ratio 1, and never touches this)
+  private aa_coeffs: Float64Array | undefined;
+  private aa_state = new Float64Array(8); // x1,x2,y1,y2 per stage
+  private aa_buf: Float32Array | undefined;
 
   // input accumulator at 16kHz
   private input_buf = new Float32Array(DTLN_FIXED_BUFFER_SIZE);
@@ -67,94 +82,94 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
   // gate
   private gate_threshold = 0.002;
   private gate_envelope = 0;
-  private gate_attack = 0;
-  private gate_release = 0;
+  private gate_target = 0;
   private gate_open = 0;
-  private gate_coeffs_set = false;
 
-  // output
-  private output_gain = 3.0;
-
-  // metrics
-  private collectMetrics = true;
-  private last_log_time = Date.now();
-  private avg_samples_processed = 0;
-  private avg_input_signal = 0;
-  private avg_output_signal = 0;
-  private avg_signal_enhancement = 0;
-  private avg_signal_suppression = 0;
-
-  constructor(options?: AudioWorkletNodeOptions) {
+  constructor() {
     super();
-    if (options?.processorOptions?.disableMetrics) {
-      this.collectMetrics = false;
-    }
     this.port.onmessage = (event) => {
-      if (typeof event.data?.output_gain === "number") {
-        this.output_gain = event.data.output_gain;
-      }
       if (typeof event.data?.noise_gate === "number") {
         this.gate_threshold = event.data.noise_gate;
       }
     };
-    this.port.postMessage("ready");
+    // Only announce readiness once the runtime is up and the denoiser
+    // exists: consumers gate audio on this message, so process() can assume
+    // a live handle, and the tflite interpreter construction happens here
+    // instead of inside a render quantum.
+    const announce = () => {
+      try {
+        this.dtln_handle = dtln.dtln_create();
+        this.port.postMessage("ready");
+      } catch (e) {
+        // No "ready" - the consumer's handshake timeout handles fallback.
+        console.error("[DTLN] failed to create denoiser:", e);
+      }
+    };
+    if (wasmReady) announce();
+    else onWasmReady.push(announce);
   }
 
   process(
     inputs: Float32Array[][],
     outputs: Float32Array[][],
-    _parameters: Map<string, Float32Array>,
+    _parameters: Record<string, Float32Array>,
   ): boolean {
-    if (
-      this.collectMetrics &&
-      this.last_log_time + SAMPLE_LOG_INTERVAL < Date.now()
-    ) {
-      this.sendMetrics();
-    }
-
-    if (!inputs?.[0]?.[0] || !outputs?.[0]?.[0]) {
-      outputs?.[0]?.[0]?.fill(0);
+    const input = inputs?.[0]?.[0];
+    const output = outputs?.[0]?.[0];
+    if (!input || !output || !this.dtln_handle) {
+      output?.fill(0);
       return true;
     }
-
-    const input = inputs[0][0];
-    const output = outputs[0][0];
 
     if (this.native_rate === 0) {
       this.native_rate = (globalThis as any).sampleRate ?? 48000;
       this.resample_ratio = this.native_rate / DTLN_SAMPLE_RATE;
-    }
-
-    if (!this.gate_coeffs_set) {
-      const block_rate = DTLN_SAMPLE_RATE / DTLN_FIXED_BUFFER_SIZE;
-      this.gate_attack = 1.0 - Math.exp(-1.0 / (block_rate * 0.005));
-      this.gate_release = 1.0 - Math.exp(-1.0 / (block_rate * 0.08));
-      this.gate_coeffs_set = true;
+      if (this.resample_ratio > 1) {
+        this.initAntiAlias();
+        // Each finished block bursts ~512*ratio samples into the ring; the
+        // default size only holds ratio <= 8 (128 kHz). Grow it for exotic
+        // device rates (176.4/192 kHz) instead of silently overwriting.
+        const needed =
+          DTLN_FIXED_BUFFER_SIZE * Math.ceil(this.resample_ratio) * 2;
+        if (needed > this.ring.length) this.ring = new Float32Array(needed);
+      }
     }
 
     const ratio = this.resample_ratio;
+    const src_buf = ratio > 1 ? this.antiAlias(input) : input;
 
     // downsample input to 16kHz
     let src = this.downsample_frac;
     while (src < input.length) {
       this.input_buf[this.input_index++] =
-        input[Math.min(Math.floor(src), input.length - 1)];
+        src_buf[Math.min(Math.floor(src), input.length - 1)];
       src += ratio;
 
       if (this.input_index >= DTLN_FIXED_BUFFER_SIZE) {
-        if (!this.dtln_handle) this.dtln_handle = dtln.dtln_create();
-
         try {
           dtln.dtln_denoise(this.dtln_handle, this.input_buf, this.dtln_out);
+          this.denoise_failures = 0;
         } catch (e) {
-          console.error("[DTLN] dtln_denoise failed:", e);
           this.dtln_out.fill(0);
+          // ponytail: recreate the handle at most ~1x/s while failing; the
+          // alternative was permanent silence plus 31 error logs a second.
+          if (this.denoise_failures++ % 32 === 0) {
+            console.error("[DTLN] dtln_denoise failed, recreating handle:", e);
+            // Create before destroy: if create throws we keep the old
+            // (allocated) handle and retry later, instead of denoising
+            // through a freed one.
+            try {
+              const next = dtln.dtln_create();
+              const old = this.dtln_handle;
+              this.dtln_handle = next;
+              dtln.dtln_destroy(old);
+            } catch {}
+          }
         }
 
         this.applyGate();
 
         this.input_index = 0;
-        if (this.collectMetrics) this.updateMetrics();
 
         // upsample back to native rate with linear interpolation
         let frac = this.upsample_frac;
@@ -167,7 +182,7 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
             const t = steps > 1 ? s / steps : 0;
             this.ring[this.ring_write] =
               this.upsample_last + t * (next - this.upsample_last);
-            this.ring_write = (this.ring_write + 1) % RING_SIZE;
+            this.ring_write = (this.ring_write + 1) % this.ring.length;
             this.ring_count++;
           }
           this.upsample_last = next;
@@ -180,8 +195,8 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
     // drain ring into output
     if (this.ring_count >= output.length) {
       for (let i = 0; i < output.length; i++) {
-        output[i] = this.ring[this.ring_read] * this.output_gain;
-        this.ring_read = (this.ring_read + 1) % RING_SIZE;
+        output[i] = this.ring[this.ring_read];
+        this.ring_read = (this.ring_read + 1) % this.ring.length;
       }
       this.ring_count -= output.length;
     } else {
@@ -199,51 +214,86 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
     }
     rms = Math.sqrt(rms / DTLN_FIXED_BUFFER_SIZE);
 
-    // envelope follower - fast attack, slow release
+    // envelope follower - instant attack, slow release
     if (rms > this.gate_envelope) {
-      this.gate_envelope += this.gate_attack * (rms - this.gate_envelope);
+      this.gate_envelope = rms;
     } else {
-      this.gate_envelope += this.gate_release * (rms - this.gate_envelope);
+      this.gate_envelope += GATE_ENV_RELEASE * (rms - this.gate_envelope);
     }
 
-    // smooth gate open/close to avoid clicks
-    const target = this.gate_envelope > this.gate_threshold ? 1.0 : 0.0;
-    this.gate_open += 0.1 * (target - this.gate_open);
+    // hysteresis: open at the threshold, close 6 dB below it, so a level
+    // hovering at the threshold doesn't flutter the gate
+    if (this.gate_envelope > this.gate_threshold) {
+      this.gate_target = 1.0;
+    } else if (this.gate_envelope < this.gate_threshold * 0.5) {
+      this.gate_target = 0.0;
+    }
 
+    // asymmetric smoothing (see the coefficients up top)
+    const prev = this.gate_open;
+    const coeff = this.gate_target > prev ? GATE_OPEN_COEFF : GATE_CLOSE_COEFF;
+    this.gate_open = prev + coeff * (this.gate_target - prev);
+
+    // ramp the gain across the block - a per-block constant steps the gain
+    // at 31 Hz, which is audible zipper noise at every transition
+    // ponytail: binary target + hysteresis; upgrade to a soft downward
+    // expander if pumping is ever audible in practice
+    const step = (this.gate_open - prev) / DTLN_FIXED_BUFFER_SIZE;
+    let g = prev;
     for (let i = 0; i < DTLN_FIXED_BUFFER_SIZE; i++) {
-      this.dtln_out[i] *= this.gate_open;
+      g += step;
+      this.dtln_out[i] *= g;
     }
   }
 
-  private sendMetrics(): void {
-    const interval = SAMPLE_LOG_INTERVAL / 1000.0;
-    const metrics: NoiseSuppressionMetrics = {
-      avg_samples_processed: this.avg_samples_processed / interval,
-      avg_input_signal: this.avg_input_signal / interval,
-      avg_output_signal: this.avg_output_signal / interval,
-      avg_signal_enhancement: this.avg_signal_enhancement / interval,
-      avg_signal_suppression: this.avg_signal_suppression / interval,
-    };
-    if (metrics.avg_samples_processed > 0 || metrics.avg_input_signal > 0) {
-      this.port.postMessage(metrics);
+  // 4th-order Butterworth low-pass at 7 kHz (two RBJ biquads), applied at
+  // native rate before decimation so 8..native/2 kHz content doesn't fold
+  // into the speech band the model expects.
+  private initAntiAlias(): void {
+    const f0 = 7000;
+    const qs = [0.5412, 1.3066]; // Butterworth 4th-order stage Qs
+    const coeffs = new Float64Array(10);
+    for (let s = 0; s < 2; s++) {
+      const w = (2 * Math.PI * f0) / this.native_rate;
+      const alpha = Math.sin(w) / (2 * qs[s]);
+      const cosw = Math.cos(w);
+      const a0 = 1 + alpha;
+      coeffs[s * 5 + 0] = (1 - cosw) / 2 / a0;
+      coeffs[s * 5 + 1] = (1 - cosw) / a0;
+      coeffs[s * 5 + 2] = (1 - cosw) / 2 / a0;
+      coeffs[s * 5 + 3] = (-2 * cosw) / a0;
+      coeffs[s * 5 + 4] = (1 - alpha) / a0;
     }
-    this.last_log_time = Date.now();
-    this.avg_samples_processed = 0;
-    this.avg_input_signal = 0;
-    this.avg_output_signal = 0;
-    this.avg_signal_suppression = 0;
-    this.avg_signal_enhancement = 0;
+    this.aa_coeffs = coeffs;
   }
 
-  private updateMetrics(): void {
-    const input_signal = totalSignal(this.input_buf);
-    const output_signal = totalSignal(this.dtln_out);
-    const diff = output_signal - input_signal;
-    this.avg_input_signal += input_signal;
-    this.avg_output_signal += output_signal;
-    this.avg_samples_processed += DTLN_FIXED_BUFFER_SIZE;
-    if (diff >= 0) this.avg_signal_enhancement += diff;
-    else this.avg_signal_suppression += Math.abs(diff);
+  private antiAlias(input: Float32Array): Float32Array {
+    if (!this.aa_buf || this.aa_buf.length < input.length) {
+      this.aa_buf = new Float32Array(input.length);
+    }
+    const c = this.aa_coeffs!;
+    const st = this.aa_state;
+    const out = this.aa_buf;
+    for (let i = 0; i < input.length; i++) {
+      let x = input[i];
+      for (let s = 0; s < 2; s++) {
+        const o = s * 4;
+        const k = s * 5;
+        const y =
+          c[k] * x +
+          c[k + 1] * st[o] +
+          c[k + 2] * st[o + 1] -
+          c[k + 3] * st[o + 2] -
+          c[k + 4] * st[o + 3];
+        st[o + 1] = st[o];
+        st[o] = x;
+        st[o + 3] = st[o + 2];
+        st[o + 2] = y;
+        x = y;
+      }
+      out[i] = x;
+    }
+    return out;
   }
 }
 

@@ -37,20 +37,12 @@ async function initAudio() {
     await audioContext.audioWorklet.addModule("audio-worklet.js");
     
     // Set up a silent worklet to initialize the module
-    const worklet = new AudioWorkletNode(audioContext, "NoiseSuppressionWorker", {
-      processorOptions: { disableMetrics: true }
-    });
+    const worklet = new AudioWorkletNode(audioContext, "NoiseSuppressionWorker");
     
     // Wait for module to load
-    await new Promise(resolve => {
-      worklet.port.onmessage = (event) => {
-        if (event.data === "ready") {
-          console.log("DTLN module ready");
-          workletReady = true;
-          resolve();
-        }
-      };
-    });
+    await waitForWorkletReady(worklet);
+    console.log("DTLN module ready");
+    workletReady = true;
     
     // Keep context alive with silent audio
     const silent = audioContext.createBufferSource();
@@ -61,6 +53,23 @@ async function initAudio() {
   } catch (error) {
     console.error("Audio initialization failed:", error);
   }
+}
+
+// The worklet posts "ready" only once its WASM runtime and denoiser exist -
+// on failure it posts nothing, so the wait needs a timeout to fail loudly.
+function waitForWorkletReady(worklet, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("DTLN worklet ready timeout")),
+      timeoutMs
+    );
+    worklet.port.onmessage = (event) => {
+      if (event.data === "ready") {
+        clearTimeout(timer);
+        resolve();
+      }
+    };
+  });
 }
 
 async function startRecording() {
@@ -151,11 +160,7 @@ async function denoise(buffer) {
     const denoiser = new AudioWorkletNode(ctx, "NoiseSuppressionWorker");
     
     // Wait for worklet to be ready
-    await new Promise(resolve => {
-      denoiser.port.onmessage = (event) => {
-        if (event.data === "ready") resolve();
-      };
-    });
+    await waitForWorkletReady(denoiser);
     
     // Process audio
     const source = ctx.createBufferSource();

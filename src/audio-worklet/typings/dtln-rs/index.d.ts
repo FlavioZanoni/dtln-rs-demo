@@ -7,9 +7,11 @@ declare module "dtln-rs" {
       handle: DtlnPluginOpaqueHandle,
       input: Float32Array,
       output: Float32Array
-    ): boolean;
+    ): void;
     dtln_create(): DtlnPluginOpaqueHandle;
     dtln_destroy(handle: DtlnPluginOpaqueHandle): void;
+    /** Callbacks run once the WASM runtime has finished initializing. */
+    postRun?: Array<() => void>;
   }
   const DtlnPlugin: DtlnPluginInterface;
   export default DtlnPlugin;

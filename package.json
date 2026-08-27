@@ -2,12 +2,13 @@
   "name": "dtln-rs-demo",
   "private": true,
   "version": "0.0.0",
-  "description": "A demo of the dtln-rs webassembly module",
+  "description": "DTLN noise suppression as an AudioWorklet, packaged for awful",
   "main": "./index.html",
   "scripts": {
     "build": "NODE_ENV=production webpack",
     "dev": "webpack --watch",
-    "serve": "http-server dist"
+    "serve": "http-server dist",
+    "sync": "NODE_ENV=production webpack && node sync-to-awful.mjs"
   },
   "keywords": [],
   "author": "CoScreen, Inc.",
@@ -19,8 +20,5 @@
     "webpack": "^5.97.1",
     "webpack-cli": "^5.1.4",
     "webpack-merge": "^6.0.1"
-  },
-  "dependencies": {
-    "buffer": "^6.0.3"
   }
 }
