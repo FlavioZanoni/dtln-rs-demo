@@ -116,7 +116,10 @@ class NoiseSuppressionWorker extends AudioWorkletProcessor {
   ): boolean {
     const input = inputs?.[0]?.[0];
     const output = outputs?.[0]?.[0];
-    if (!input || !output || !this.dtln_handle) {
+    // Compare against undefined, never truthiness: dtln_create() hands out
+    // incrementing ids and the FIRST one is 0, so `!handle` reads a perfectly
+    // good denoiser as a missing one and mutes the whole worklet.
+    if (!input || !output || this.dtln_handle === undefined) {
       output?.fill(0);
       return true;
     }
