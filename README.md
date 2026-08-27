@@ -106,14 +106,19 @@ bundle by hand.** It looks for `../awful2` (then `../awful`), or takes a path:
 node sync-to-awful.mjs ../wherever/awful2     # or set AWFUL_DIR
 ```
 
-## Demo page
+## Verifying it
 
-A standalone page to record a clip, denoise it, and A/B the two:
+`index.html` is a self-check: it renders synthetic noise, speech, and silence
+through the worklet in an `OfflineAudioContext` and asserts that noise is
+suppressed, speech survives, and silence stays silent.
 
 ```sh
-npm run dev      # webpack --watch
-npm run serve    # http-server dist
+npm run build && npm run serve   # then open the page
 ```
+
+It exists because the easiest thing to ship here is a *silent* worklet, and no
+amount of unit testing with fake audio nodes can catch that - the WASM never
+runs in them. If you change `main.ts`, run this before syncing.
 
 ## Layout
 
@@ -121,7 +126,7 @@ npm run serve    # http-server dist
 | --- | --- |
 | `src/audio-worklet/main.ts` | the worklet: resampling, blocking, gate, ring buffer |
 | `src/audio-worklet/dtln.js` | emscripten glue + embedded model (generated; only its hand-written tail is edited) |
-| `src/app.js`, `index.html` | the demo page |
+| `src/test.js`, `index.html` | the self-check page |
 | `sync-to-awful.mjs` | build artifact → awful, with cache-busting hash |
 
 ## Attribution

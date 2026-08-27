@@ -34,11 +34,11 @@ const common = {
   },
 };
 
-const appBundle = merge(common, {
+const selfCheck = merge(common, {
   target: 'web',
-  entry: "./src/app.js",
+  entry: "./src/test.js",
   output: {
-    filename: "app.js",
+    filename: "test.js",
   },
 });
 
@@ -51,6 +51,6 @@ const audioWorklet = merge(common, {
 });
 
 export default [
-  appBundle,
+  selfCheck,
   audioWorklet,
 ];
