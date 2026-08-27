@@ -119,6 +119,12 @@ suppressed, speech survives, and silence stays silent.
 npm run build && npm run serve   # then open the page
 ```
 
+It is also published to GitHub Pages on every push to `main`
+(`.github/workflows/pages.yml`), so it can be run without a checkout:
+<https://flaviozanoni.github.io/dtln-rs-demo/>. It needs no microphone and no
+user gesture - the signals are synthetic and rendered in an
+`OfflineAudioContext` - so it runs to completion on load.
+
 A healthy run:
 
 ```
@@ -147,6 +153,7 @@ completely - silently, since nothing throws. Compare against `undefined`.
 | `src/audio-worklet/dtln.js` | emscripten glue + embedded model (generated; only its hand-written tail is edited) |
 | `src/test.js`, `index.html` | the self-check page |
 | `sync-to-awful.mjs` | build artifact → awful, with cache-busting hash |
+| `.github/workflows/pages.yml` | builds `dist/` and publishes the self-check |
 
 ## Attribution
 
